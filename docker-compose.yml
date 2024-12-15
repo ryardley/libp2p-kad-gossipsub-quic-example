@@ -1,0 +1,38 @@
+version: '3.8'
+services:
+  bootstrap:
+    image: norepo/p2p-app
+    environment:
+      - ROLE=bootstrap
+    deploy:
+      replicas: 1
+      endpoint_mode: dnsrr
+    networks:
+      - p2p-net
+
+  peer:
+    image: norepo/p2p-app
+    environment:
+      - ROLE=peer
+    deploy:
+      replicas: 1
+      endpoint_mode: dnsrr
+    depends_on:
+      - bootstrap
+    networks:
+      - p2p-net
+
+  sender:
+    image: norepo/p2p-app
+    environment:
+      - ROLE=sender
+    deploy:
+      replicas: 1
+      endpoint_mode: dnsrr
+    depends_on:
+      - peer
+    networks:
+      - p2p-net
+networks:
+  p2p-net:
+    driver: overlay
