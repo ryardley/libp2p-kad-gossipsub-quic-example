@@ -1,5 +1,16 @@
+Build the dockerfile
 
+```
+./build.sh
+```
 
+Deploy the image to docker swarm
+
+```
+./deploy.sh
+```
+
+Inspect the output
 
 ```
 ./inspect.sh
