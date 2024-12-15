@@ -93,6 +93,15 @@ p2p_sender.1.cns70zxuyhyc@nixos    | Sent and array of bytes 1,2,3,4 to be gossi
 ```
 
 
+Topology:
+
+```mermaid
+
+graph TD
+  Sender -> Peer
+  Peer -> Bootstrap
+```
+
 Points to NOTE:
 
 - Swarm uses an internal IP load balancer which might be playing up with network transports possibly QUIC
