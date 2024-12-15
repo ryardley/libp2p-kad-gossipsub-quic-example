@@ -1,22 +1,28 @@
-This is an example of libp2p with the following config:
-- optional mdns (ytd)
-- kademlia for peer routing
-- gossipsub
-- quic
+# LibP2P Implementation with Docker Swarm
 
-Build the dockerfile
+This guide describes an implementation of LibP2P with the following configuration:
+
+- MDNS (optional, yet to be done)
+- Kademlia for peer routing
+- GossipSub for pub/sub messaging
+- QUIC for transport
+
+
+## Quick Start
+
+To get started, follow these commands:
 
 ```
+# Build the Docker image
 ./build.sh
-```
 
-Deploy the image to docker swarm
-
-```
+# Deploy to Docker Swarm
 ./deploy.sh
 ```
 
-Inspect the output
+## Inspecting the output
+
+Viewing the output shows the interaction between containers worked:
 
 ```
 ./inspect.sh
@@ -98,8 +104,16 @@ p2p_sender.1.cns70zxuyhyc@nixos    | Sent and array of bytes 1,2,3,4 to be gossi
 
 ```
 
+## Network Architecture
 
-Topology:
+The implementation consists of three main components:
+
+- Bootstrap Node: Acts as the initial entry point for the P2P network
+- Peer Node: A standard network participant that connects to the bootstrap node
+- Sender Node: Connects to the peer node and sends messages through the network
+
+
+The network topology follows this pattern:
 
 ```mermaid
 graph TD
@@ -107,9 +121,23 @@ graph TD
   Peer --dials--> Bootstrap
 ```
 
-Points to NOTE:
+## Network Considerations
 
-- Swarm uses an internal IP load balancer which might be playing up with network transports possibly QUIC
-- This means that a container's internal IP address is different to the IP address a second container uses to connect to it.
-- This is similar to NAT and may require specific hole punching.
-- To avoid this I have used round robin IPs with `endpoint_mode: dnsrr` and then used the resolving dns to determine the IP.
+When deploying this system in Docker Swarm, there are important networking considerations to keep in mind:
+
+### Docker Swarm Networking Behavior
+
+Docker Swarm uses an internal IP load balancer which can affect network transports, particularly QUIC. This creates two key challenges:
+
+1. Container IP Address Translation:
+    - A container's internal IP address differs from the IP address other containers use to connect to it
+    - This behavior is similar to NAT (Network Address Translation)
+    - May require specific hole punching techniques to ensure proper connectivity
+
+2. DNS Resolution Strategy:
+
+    - To address the IP translation issues, we use round-robin DNS with endpoint_mode: dnsrr
+    - Container discovery is handled through DNS resolution rather than direct IP addressing
+    - This helps maintain consistent connectivity between containers despite the internal IP translation
+
+This configuration ensures reliable communication between nodes while working within Docker Swarm's networking constraints.
