@@ -91,3 +91,11 @@ p2p_sender.1.cns70zxuyhyc@nixos    | Sending message 1,2,3,4
 p2p_sender.1.cns70zxuyhyc@nixos    | Sent and array of bytes 1,2,3,4 to be gossiped
 
 ```
+
+
+Points to NOTE:
+
+- Swarm uses an internal IP load balancer which might be playing up with network transports possibly QUIC
+- This means that a container's internal IP address is different to the IP address a second container uses to connect to it.
+- This is similar to NAT and may require specific hole punching.
+- To avoid this I have used round robin IPs with `endpoint_mode: dnsrr` and then used the resolving dns to determine the IP.
