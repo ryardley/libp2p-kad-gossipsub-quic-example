@@ -1,3 +1,9 @@
+This is an example of libp2p with the following config:
+- optional mdns (ytd)
+- kademlia for peer routing
+- gossipsub
+- quic
+
 Build the dockerfile
 
 ```
