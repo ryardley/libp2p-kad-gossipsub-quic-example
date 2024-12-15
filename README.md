@@ -96,10 +96,9 @@ p2p_sender.1.cns70zxuyhyc@nixos    | Sent and array of bytes 1,2,3,4 to be gossi
 Topology:
 
 ```mermaid
-
 graph TD
-  Sender -> Peer
-  Peer -> Bootstrap
+  Sender --dials--> Peer
+  Peer --dials--> Bootstrap
 ```
 
 Points to NOTE:
