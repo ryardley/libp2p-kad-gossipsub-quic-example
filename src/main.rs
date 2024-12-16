@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    info!("STARTING! 01:32");
+    info!("STARTING! 12:46");
     let enable_mdns = false;
     let topic = "some_topic";
     let ed25519_keypair = ed25519::Keypair::generate();
