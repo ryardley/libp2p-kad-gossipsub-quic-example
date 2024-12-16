@@ -1,3 +1,5 @@
+use anyhow::bail;
+use anyhow::Context;
 use anyhow::Result;
 use libp2p::{
     connection_limits::{self, ConnectionLimits},
@@ -11,7 +13,6 @@ use libp2p::{
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     Multiaddr, StreamProtocol, Swarm,
 };
-use rand::{thread_rng, RngCore};
 use std::{hash::DefaultHasher, io::Error, time::Duration};
 use std::{
     hash::{Hash, Hasher},
@@ -88,13 +89,45 @@ fn create_mdns_kad_behaviour(
     })
 }
 
+fn resolve_ip(domain: &str) -> Result<String> {
+    let output = Command::new("dig")
+        .arg("+short")
+        .arg(domain)
+        .output()
+        .context("failed to execute dig")?;
+    let ip = String::from_utf8(output.stdout)
+        .context("invalid utf8")?
+        .trim()
+        .to_string();
+
+    if !ip.len() == 0 {
+        bail!("IP was not detected by dig")
+    }
+
+    Ok(ip)
+}
+
+fn dial_node(swarm: &mut Swarm<NodeBehaviour>, domain: &str) -> Result<()> {
+    println!("Now dialing in to {}", domain);
+    let ip = resolve_ip(domain)?;
+    println!("Resolved '{}' to {}", domain, &ip);
+    let addr = format!("/ip4/{}/udp/4001/quic-v1", ip).to_string();
+    println!("addr:{}", addr);
+    let multi: Multiaddr = addr.parse()?;
+    println!("Dialing: {}...", multi);
+    swarm.dial(multi.clone())?;
+    println!("Finished dialing: {}", multi);
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    info!("STARTING! 12:46");
+    info!("STARTING!");
     let enable_mdns = false;
     let topic = "some_topic";
     let ed25519_keypair = ed25519::Keypair::generate();
@@ -118,43 +151,11 @@ async fn main() -> Result<()> {
     if std::env::var("ROLE").unwrap_or_default() == "peer" {
         println!("Waiting 10 seconds before dialing...");
         sleep(Duration::from_secs(10)).await;
-        println!("Now dialing in to bootstrap");
-        let output = Command::new("dig")
-            .arg("+short")
-            .arg("bootstrap")
-            .output()
-            .expect("failed to execute dig");
-        let ip = String::from_utf8(output.stdout)
-            .expect("invalid utf8")
-            .trim()
-            .to_string();
-        assert!(ip.len() > 0, "Panicing because IP could not be determined");
-        let addr = format!("/ip4/{}/udp/4001/quic-v1", ip).to_string();
-        println!("addr:{}", addr);
-        let multi: Multiaddr = addr.parse()?;
-        println!("Dialing: {}...", multi);
-        swarm.dial(multi.clone())?;
-        println!("Finished dialing: {}", multi);
+        dial_node(&mut swarm, "bootstrap")?;
     } else if std::env::var("ROLE").unwrap_or_default() == "sender" {
         println!("Waiting 11 seconds before dialing...");
         sleep(Duration::from_secs(11)).await;
-        println!("Now dialing in to peer");
-        let output = Command::new("dig")
-            .arg("+short")
-            .arg("peer")
-            .output()
-            .expect("failed to execute dig");
-        let ip = String::from_utf8(output.stdout)
-            .expect("invalid utf8")
-            .trim()
-            .to_string();
-        assert!(ip.len() > 0, "Panicing because IP could not be determined");
-        let addr = format!("/ip4/{}/udp/4001/quic-v1", ip).to_string();
-        println!("addr:{}", addr);
-        let multi: Multiaddr = addr.parse()?;
-        println!("Dialing: {}...", multi);
-        swarm.dial(multi.clone())?;
-        println!("Finished dialing: {}", multi);
+        dial_node(&mut swarm, "peer")?;
         tokio::spawn(async move {
             println!("Waiting for 10 seconds for network to settle...");
             sleep(Duration::from_secs(10)).await;
