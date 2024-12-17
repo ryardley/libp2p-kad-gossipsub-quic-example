@@ -107,7 +107,7 @@ fn resolve_ip(domain: &str) -> Result<String> {
     Ok(ip)
 }
 
-fn dial_node(swarm: &mut Swarm<NodeBehaviour>, domain: &str) -> Result<()> {
+async fn dial_node(cmd_tx:&Sender<NetworkPeerCommand>, domain: &str) -> Result<()> {
     println!("Now dialing in to {}", domain);
     let ip = resolve_ip(domain)?;
     println!("Resolved '{}' to {}", domain, &ip);
@@ -115,10 +115,15 @@ fn dial_node(swarm: &mut Swarm<NodeBehaviour>, domain: &str) -> Result<()> {
     println!("addr:{}", addr);
     let multi: Multiaddr = addr.parse()?;
     println!("Dialing: {}...", multi);
-    swarm.dial(multi.clone())?;
+    cmd_tx.send(NetworkPeerCommand::Dial(multi.clone())).await?;
     println!("Finished dialing: {}", multi);
 
     Ok(())
+}
+
+enum NetworkPeerCommand {
+    GossipPublish { topic: String, data: Vec<u8> },
+    Dial(Multiaddr),
 }
 
 #[tokio::main]
@@ -126,10 +131,12 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
+    let (mut to_bus_tx, mut from_net_rx) = channel::<Vec<u8>>(100); // TODO : tune this param
+    let (cmd_tx, mut cmd_rx) = channel::<NetworkPeerCommand>(100); // TODO : tune this param
 
     info!("STARTING!");
     let enable_mdns = false;
-    let topic = "some_topic";
+    let topic_str = "some_topic";
     let ed25519_keypair = ed25519::Keypair::generate();
 
     let keypair: libp2p::identity::Keypair = ed25519_keypair.try_into()?;
@@ -137,36 +144,38 @@ async fn main() -> Result<()> {
         .with_tokio()
         .with_quic()
         .with_behaviour(|key| create_mdns_kad_behaviour(enable_mdns, key))?
-        // .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
-    let topic = gossipsub::IdentTopic::new(topic);
+    let topic = gossipsub::IdentTopic::new(topic_str);
 
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
     let addr = "/ip4/0.0.0.0/udp/4001/quic-v1".to_string();
     swarm.listen_on(addr.parse()?)?;
-    let (mut to_bus_tx, mut from_net_rx) = channel::<Vec<u8>>(100); // TODO : tune this param
-    let (to_net_tx, mut from_bus_rx) = channel::<Vec<u8>>(100); // TODO : tune this param
-
-    if std::env::var("ROLE").unwrap_or_default() == "peer" {
-        println!("Waiting 10 seconds before dialing...");
-        sleep(Duration::from_secs(10)).await;
-        dial_node(&mut swarm, "bootstrap")?;
-    } else if std::env::var("ROLE").unwrap_or_default() == "sender" {
-        println!("Waiting 11 seconds before dialing...");
-        sleep(Duration::from_secs(11)).await;
-        dial_node(&mut swarm, "peer")?;
-        tokio::spawn(async move {
-            println!("Waiting for 10 seconds for network to settle...");
-            sleep(Duration::from_secs(10)).await;
-            println!("Finished waiting!");
-            println!("Sending message 1,2,3,4");
-            to_net_tx.send(vec![1, 2, 3, 4]).await?; // this should be sent over gossipsub to all the nodes
-            println!("Sent and array of bytes 1,2,3,4 to be gossiped");
+    tokio::spawn({
+        async move {
+            if std::env::var("ROLE").unwrap_or_default() == "peer" {
+                println!("Waiting 10 seconds before dialing...");
+                sleep(Duration::from_secs(10)).await;
+                dial_node(&cmd_tx, "bootstrap").await?;
+            } else if std::env::var("ROLE").unwrap_or_default() == "sender" {
+                println!("Waiting 11 seconds before dialing...");
+                sleep(Duration::from_secs(11)).await;
+                dial_node(&cmd_tx, "peer").await?;
+                println!("Waiting for 10 seconds for network to settle...");
+                sleep(Duration::from_secs(10)).await;
+                println!("Finished waiting!");
+                println!("Sending message 1,2,3,4");
+                cmd_tx
+                    .send(NetworkPeerCommand::GossipPublish {
+                        topic: topic_str.to_string(),
+                        data: vec![1, 2, 3, 4],
+                    })
+                    .await?; // this should be sent over gossipsub to all the nodes
+                println!("Sent and array of bytes 1,2,3,4 to be gossiped");
+            }
             anyhow::Ok(())
-        });
-    }
-
+        }
+    });
     tokio::spawn(async move {
         loop {
             select! {
@@ -179,11 +188,19 @@ async fn main() -> Result<()> {
 
     loop {
         select! {
-            Some(line) = from_bus_rx.recv() => {
-                if let Err(e) = swarm
-                    .behaviour_mut().gossipsub
-                    .publish(topic.clone(), line) {
-                    error!(error=?e, "Error publishing line to swarm");
+          
+            Some(command) = cmd_rx.recv() => {
+                match command {
+                    NetworkPeerCommand::GossipPublish { data, topic } => {
+                        if let Err(e) = swarm
+                            .behaviour_mut().gossipsub
+                            .publish(gossipsub::IdentTopic::new(topic), data) {
+                            error!(error=?e, "Error publishing line to swarm");
+                        }
+                    },
+                    NetworkPeerCommand::Dial(multi) => {
+                        swarm.dial(multi)?;
+                    }
                 }
             }
 
