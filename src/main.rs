@@ -255,6 +255,9 @@ async fn wait_for_publish_confirmation(
     }
 }
 
+const BACKOFF_DELAY: u64 = 500;
+const BACKOFF_MAX_RETRIES: u32 = 10;
+
 // This will dial domain with retry and exponential backoff
 async fn dial_domain(
     cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
@@ -262,7 +265,7 @@ async fn dial_domain(
     domain: &str,
 ) -> Result<()> {
     println!("Now dialing in to {}", domain);
-    retry_with_backoff(|| attempt_connection(cmd_tx, event_tx, domain), 10, 500).await?;
+    retry_with_backoff(|| attempt_connection(cmd_tx, event_tx, domain), BACKOFF_MAX_RETRIES, BACKOFF_DELAY).await?;
     Ok(())
 }
 
@@ -275,8 +278,8 @@ async fn gossip_data(
     println!("Now publishing data {:?} on topic {}", data, topic);
     retry_with_backoff(
         || attempt_gossip_publish(cmd_tx, event_tx, topic, data.clone()),
-        10,
-        500,
+        BACKOFF_MAX_RETRIES,
+        BACKOFF_DELAY,
     )
     .await?;
     Ok(())
@@ -294,8 +297,9 @@ enum NetworkPeerCommand {
 #[derive(Clone, Debug)]
 enum NetworkPeerEvent {
     GossipData(Vec<u8>),
-    GossipPublishError { // TODO: return an error here? DialError is not Clonable so we have
-                         // avoided passing it on
+    GossipPublishError {
+        // TODO: return an error here? DialError is not Clonable so we have
+        // avoided passing it on
         correlation_id: usize,
     },
     GossipPublished {
