@@ -262,7 +262,7 @@ async fn dial_domain(
     domain: &str,
 ) -> Result<()> {
     println!("Now dialing in to {}", domain);
-    retry_with_backoff(|| attempt_connection(cmd_tx, event_tx, domain), 10, 100).await?;
+    retry_with_backoff(|| attempt_connection(cmd_tx, event_tx, domain), 10, 500).await?;
     Ok(())
 }
 
@@ -276,7 +276,7 @@ async fn gossip_data(
     retry_with_backoff(
         || attempt_gossip_publish(cmd_tx, event_tx, topic, data.clone()),
         10,
-        100,
+        500,
     )
     .await?;
     Ok(())
