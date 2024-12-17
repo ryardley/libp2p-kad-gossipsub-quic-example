@@ -107,7 +107,7 @@ fn resolve_ip(domain: &str) -> Result<String> {
     Ok(ip)
 }
 
-async fn dial_node(cmd_tx:&Sender<NetworkPeerCommand>, domain: &str) -> Result<()> {
+async fn dial_node(cmd_tx: &Sender<NetworkPeerCommand>, domain: &str) -> Result<()> {
     println!("Now dialing in to {}", domain);
     let ip = resolve_ip(domain)?;
     println!("Resolved '{}' to {}", domain, &ip);
@@ -124,6 +124,31 @@ async fn dial_node(cmd_tx:&Sender<NetworkPeerCommand>, domain: &str) -> Result<(
 enum NetworkPeerCommand {
     GossipPublish { topic: String, data: Vec<u8> },
     Dial(Multiaddr),
+}
+
+async fn peer_behaviour(cmd_tx: &Sender<NetworkPeerCommand>) -> Result<()> {
+    println!("Waiting 10 seconds before dialing...");
+    sleep(Duration::from_secs(10)).await;
+    dial_node(cmd_tx, "bootstrap").await?;
+    Ok(())
+}
+
+async fn sender_behaviour(cmd_tx: &Sender<NetworkPeerCommand>, topic:&str) -> Result<()> {
+    println!("Waiting 11 seconds before dialing...");
+    sleep(Duration::from_secs(11)).await;
+    dial_node(&cmd_tx, "peer").await?;
+    println!("Waiting for 10 seconds for network to settle...");
+    sleep(Duration::from_secs(10)).await;
+    println!("Finished waiting!");
+    println!("Sending message 1,2,3,4");
+    cmd_tx
+        .send(NetworkPeerCommand::GossipPublish {
+            topic: topic.to_string(),
+            data: vec![1, 2, 3, 4],
+        })
+        .await?; // this should be sent over gossipsub to all the nodes
+    println!("Sent and array of bytes 1,2,3,4 to be gossiped");
+    Ok(())
 }
 
 #[tokio::main]
@@ -151,31 +176,21 @@ async fn main() -> Result<()> {
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
     let addr = "/ip4/0.0.0.0/udp/4001/quic-v1".to_string();
     swarm.listen_on(addr.parse()?)?;
+
+    // Specialized role behaviours
     tokio::spawn({
         async move {
-            if std::env::var("ROLE").unwrap_or_default() == "peer" {
-                println!("Waiting 10 seconds before dialing...");
-                sleep(Duration::from_secs(10)).await;
-                dial_node(&cmd_tx, "bootstrap").await?;
-            } else if std::env::var("ROLE").unwrap_or_default() == "sender" {
-                println!("Waiting 11 seconds before dialing...");
-                sleep(Duration::from_secs(11)).await;
-                dial_node(&cmd_tx, "peer").await?;
-                println!("Waiting for 10 seconds for network to settle...");
-                sleep(Duration::from_secs(10)).await;
-                println!("Finished waiting!");
-                println!("Sending message 1,2,3,4");
-                cmd_tx
-                    .send(NetworkPeerCommand::GossipPublish {
-                        topic: topic_str.to_string(),
-                        data: vec![1, 2, 3, 4],
-                    })
-                    .await?; // this should be sent over gossipsub to all the nodes
-                println!("Sent and array of bytes 1,2,3,4 to be gossiped");
-            }
+            let role = std::env::var("ROLE").unwrap_or_default();
+            match role.as_str() {
+                "peer" => peer_behaviour(&cmd_tx).await?,
+                "sender" => sender_behaviour(&cmd_tx, topic_str).await?,
+                _ => (),
+            };
             anyhow::Ok(())
         }
     });
+
+    // Print any messages received
     tokio::spawn(async move {
         loop {
             select! {
@@ -188,7 +203,7 @@ async fn main() -> Result<()> {
 
     loop {
         select! {
-          
+
             Some(command) = cmd_rx.recv() => {
                 match command {
                     NetworkPeerCommand::GossipPublish { data, topic } => {
