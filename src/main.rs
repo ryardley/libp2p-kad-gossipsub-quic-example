@@ -16,6 +16,7 @@ use libp2p::{
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     Multiaddr, StreamProtocol, Swarm,
 };
+use std::net::ToSocketAddrs;
 use std::future::Future;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -98,22 +99,20 @@ fn create_mdns_kad_behaviour(
     })
 }
 
-fn resolve_ip(domain: &str) -> Result<String> {
-    let output = Command::new("dig")
-        .arg("+short")
-        .arg(domain)
-        .output()
-        .context("failed to execute dig")?;
-    let ip = String::from_utf8(output.stdout)
-        .context("invalid utf8")?
-        .trim()
-        .to_string();
+fn resolve_ipv4(domain: &str) -> Result<String> {
+    let addr = format!("{}:0", domain)
+        .to_socket_addrs()?
+        .find(|addr| addr.ip().is_ipv4())
+        .context("no IPv4 addresses found")?;
+    Ok(addr.ip().to_string())
+}
 
-    if !ip.len() == 0 {
-        bail!("IP was not detected by dig")
-    }
-
-    Ok(ip)
+fn resolve_ipv6(domain: &str) -> Result<String> {
+    let addr = format!("{}:0", domain)
+        .to_socket_addrs()?
+        .find(|addr| addr.ip().is_ipv6())
+        .context("no IPv6 addresses found")?;
+    Ok(addr.ip().to_string())
 }
 
 /// Retries an async operation with exponential backoff
@@ -168,7 +167,7 @@ async fn attempt_connection(
     domain: &str,
 ) -> Result<()> {
     let mut event_rx = event_tx.subscribe();
-    let ip = resolve_ip(domain)?;
+    let ip = resolve_ipv4(domain)?;
     println!("Resolved '{}' to {}", domain, &ip);
 
     let addr = format!("/ip4/{}/udp/4001/quic-v1", ip);
