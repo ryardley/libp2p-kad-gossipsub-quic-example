@@ -159,3 +159,11 @@ Docker Swarm uses an internal IP load balancer which can affect network transpor
     - This helps maintain consistent connectivity between containers despite the internal IP translation
 
 This configuration ensures reliable communication between nodes while working within Docker Swarm's networking constraints.
+
+### Exponential Backoff
+
+Exponential backoff has been applied to dialing in to swarm nodes as nodes may be offline or rebooting as they are connecting to each other to form the network in restart situations. 
+
+In order for this to work and to avoid sharing a `Swarm` within an `Arc<Mutex<T>>` everywhere here I am demonstrating using channels to manage asynchrony and ownership.
+
+Each command is managed in a separate tokio spawn to handle it's EB workflow and commands are simply sent to the swarm over a channel. This means the function managing the backoff need not hold a mutable reference to the swarm. 
