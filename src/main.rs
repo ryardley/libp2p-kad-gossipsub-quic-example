@@ -1,6 +1,7 @@
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use libp2p::swarm::ConnectionId;
 use libp2p::{
     connection_limits::{self, ConnectionLimits},
     futures::StreamExt,
@@ -20,7 +21,7 @@ use std::{
 };
 use tokio::{
     select,
-    sync::mpsc::{channel, Sender},
+    sync::{broadcast, mpsc},
     time::sleep,
 };
 use tracing::{error, info};
@@ -107,7 +108,23 @@ fn resolve_ip(domain: &str) -> Result<String> {
     Ok(ip)
 }
 
-async fn dial_node(cmd_tx: &Sender<NetworkPeerCommand>, domain: &str) -> Result<()> {
+async fn dial_multiaddr(
+    cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
+    _event_rx: &broadcast::Receiver<NetworkPeerEvent>,
+    multiaddr: &Multiaddr,
+) -> Result<()> {
+    cmd_tx
+        .send(NetworkPeerCommand::Dial(multiaddr.clone()))
+        .await?;
+
+    Ok(())
+}
+
+async fn dial_domain(
+    cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
+    event_rx: &broadcast::Receiver<NetworkPeerEvent>,
+    domain: &str,
+) -> Result<()> {
     println!("Now dialing in to {}", domain);
     let ip = resolve_ip(domain)?;
     println!("Resolved '{}' to {}", domain, &ip);
@@ -115,9 +132,9 @@ async fn dial_node(cmd_tx: &Sender<NetworkPeerCommand>, domain: &str) -> Result<
     println!("addr:{}", addr);
     let multi: Multiaddr = addr.parse()?;
     println!("Dialing: {}...", multi);
+    dial_multiaddr(cmd_tx, event_rx, &multi).await?;
     cmd_tx.send(NetworkPeerCommand::Dial(multi.clone())).await?;
     println!("Finished dialing: {}", multi);
-
     Ok(())
 }
 
@@ -126,17 +143,30 @@ enum NetworkPeerCommand {
     Dial(Multiaddr),
 }
 
-async fn peer_behaviour(cmd_tx: &Sender<NetworkPeerCommand>) -> Result<()> {
+#[derive(Clone, Debug)]
+enum NetworkPeerEvent {
+    GossipData(Vec<u8>),
+    OutgoinConnectionError { connection_id: ConnectionId },
+}
+
+async fn peer_behaviour(
+    cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
+    event_rx: &broadcast::Receiver<NetworkPeerEvent>,
+) -> Result<()> {
     println!("Waiting 10 seconds before dialing...");
     sleep(Duration::from_secs(10)).await;
-    dial_node(cmd_tx, "bootstrap").await?;
+    dial_domain(cmd_tx, event_rx, "bootstrap").await?;
     Ok(())
 }
 
-async fn sender_behaviour(cmd_tx: &Sender<NetworkPeerCommand>, topic:&str) -> Result<()> {
+async fn sender_behaviour(
+    cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
+    event_rx: &broadcast::Receiver<NetworkPeerEvent>,
+    topic: &str,
+) -> Result<()> {
     println!("Waiting 11 seconds before dialing...");
     sleep(Duration::from_secs(11)).await;
-    dial_node(&cmd_tx, "peer").await?;
+    dial_domain(&cmd_tx, event_rx, "peer").await?;
     println!("Waiting for 10 seconds for network to settle...");
     sleep(Duration::from_secs(10)).await;
     println!("Finished waiting!");
@@ -156,8 +186,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
-    let (mut to_bus_tx, mut from_net_rx) = channel::<Vec<u8>>(100); // TODO : tune this param
-    let (cmd_tx, mut cmd_rx) = channel::<NetworkPeerCommand>(100); // TODO : tune this param
+
+    let (mut event_tx, _) = broadcast::channel::<NetworkPeerEvent>(100); // TODO : tune this param
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<NetworkPeerCommand>(100); // TODO : tune this param
 
     info!("STARTING!");
     let enable_mdns = false;
@@ -179,11 +210,14 @@ async fn main() -> Result<()> {
 
     // Specialized role behaviours
     tokio::spawn({
+        let event_tx = event_tx.clone();
         async move {
+            let event_rx = event_tx.subscribe();
+
             let role = std::env::var("ROLE").unwrap_or_default();
             match role.as_str() {
-                "peer" => peer_behaviour(&cmd_tx).await?,
-                "sender" => sender_behaviour(&cmd_tx, topic_str).await?,
+                "peer" => peer_behaviour(&cmd_tx, &event_rx).await?,
+                "sender" => sender_behaviour(&cmd_tx, &event_rx, topic_str).await?,
                 _ => (),
             };
             anyhow::Ok(())
@@ -191,11 +225,20 @@ async fn main() -> Result<()> {
     });
 
     // Print any messages received
-    tokio::spawn(async move {
-        loop {
-            select! {
-                Some(line) = from_net_rx.recv() => {
-                    println!("Received raw message data: {:?}", line);
+    tokio::spawn({
+        let event_tx = event_tx.clone();
+        async move {
+            loop {
+                let mut event_rx = event_tx.subscribe();
+                select! {
+                    Ok(event) = event_rx.recv() => {
+                        match event {
+                            NetworkPeerEvent::GossipData(data) => {
+                                println!("Received raw message data: {:?}", data);
+                            },
+                            _ => ()
+                        }
+                    }
                 }
             }
         }
@@ -220,7 +263,7 @@ async fn main() -> Result<()> {
             }
 
             event = swarm.select_next_some() =>  {
-                process_swarm_event(&mut swarm, &mut to_bus_tx, event).await?
+                process_swarm_event(&mut swarm, &mut event_tx, event).await?
             }
         }
     }
@@ -228,7 +271,7 @@ async fn main() -> Result<()> {
 
 async fn process_swarm_event(
     swarm: &mut Swarm<NodeBehaviour>,
-    to_bus_tx: &mut Sender<Vec<u8>>,
+    event_tx: &mut broadcast::Sender<NetworkPeerEvent>,
     event: SwarmEvent<NodeBehaviourEvent>,
 ) -> Result<()> {
     match event {
@@ -288,7 +331,7 @@ async fn process_swarm_event(
         })) => {
             info!("Got message with id: {id} from peer: {peer_id}",);
             // info!("{:?}", message);
-            to_bus_tx.send(message.data).await?;
+            event_tx.send(NetworkPeerEvent::GossipData(message.data))?;
         }
         SwarmEvent::NewListenAddr { address, .. } => {
             info!("Local node is listening on {address}");
