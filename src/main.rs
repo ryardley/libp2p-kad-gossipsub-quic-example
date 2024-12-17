@@ -65,7 +65,7 @@ fn create_mdns_kad_behaviour(
         .mesh_n(3)
         .mesh_n_low(2)
         .mesh_outbound_min(1)
-        .heartbeat_interval(Duration::from_secs(10))
+        .heartbeat_interval(Duration::from_secs(1))
         .validation_mode(gossipsub::ValidationMode::Strict)
         .message_id_fn(message_id_fn)
         .build()
@@ -294,7 +294,8 @@ enum NetworkPeerCommand {
 #[derive(Clone, Debug)]
 enum NetworkPeerEvent {
     GossipData(Vec<u8>),
-    GossipPublishError {
+    GossipPublishError { // TODO: return an error here? DialError is not Clonable so we have
+                         // avoided passing it on
         correlation_id: usize,
     },
     GossipPublished {
@@ -373,6 +374,7 @@ async fn main() -> Result<()> {
     });
 
     // Print any messages received
+    // This might represent the event bus in a broader application
     tokio::spawn({
         let event_tx = event_tx.clone();
         async move {
@@ -394,11 +396,12 @@ async fn main() -> Result<()> {
 
     loop {
         select! {
+            // Process commands
             Some(command) = cmd_rx.recv() => {
                 match command {
                     NetworkPeerCommand::GossipPublish { data, topic, correlation_id } => {
-                        match swarm
-                            .behaviour_mut().gossipsub
+                        let gossipsub_behaviour = &mut swarm.behaviour_mut().gossipsub;
+                        match gossipsub_behaviour
                             .publish(gossipsub::IdentTopic::new(topic), data) {
                             Ok(message_id) => {
                                 event_tx.send(NetworkPeerEvent::GossipPublished { correlation_id, message_id })?;
@@ -414,7 +417,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-
+            // Process events
             event = swarm.select_next_some() =>  {
                 process_swarm_event(&mut swarm, &mut event_tx, event).await?
             }
