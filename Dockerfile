@@ -8,8 +8,9 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 RUN mkdir -p target
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN mkdir src && echo "fn main() { println!(\"main\") }" > src/main.rs
 RUN cargo build
 COPY src ./src
+RUN find src -name "*.rs" -exec touch {} \;
 RUN cargo build
 CMD ["./target/debug/p2p-service"]
