@@ -3,6 +3,8 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use libp2p::gossipsub::MessageId;
+use libp2p::gossipsub::PublishError;
+use libp2p::swarm::DialError;
 use libp2p::swarm::{dial_opts::DialOpts, ConnectionId};
 use libp2p::{
     connection_limits::{self, ConnectionLimits},
@@ -20,6 +22,7 @@ use std::net::ToSocketAddrs;
 use std::future::Future;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::{hash::DefaultHasher, io::Error, time::Duration};
 use std::{
     hash::{Hash, Hasher},
@@ -197,10 +200,10 @@ async fn wait_for_connection(
                     return Ok(());
                 }
             }
-            NetworkPeerEvent::OutgoingConnectionError { connection_id } => {
+            NetworkPeerEvent::OutgoingConnectionError { connection_id, error } => {
                 if connection_id == dial_connection {
-                    println!("Connection {} failed retrying...", connection_id);
-                    sleep(Duration::from_secs(2)).await;
+                    println!("Connection {} failed because of error {}. Retrying...", connection_id, error);
+                    // sleep(Duration::from_secs(2)).await;
                     return Err(anyhow!("Connection failed"));
                 }
             }
@@ -244,9 +247,10 @@ async fn wait_for_publish_confirmation(
             }
             NetworkPeerEvent::GossipPublishError {
                 correlation_id: published_id,
+                error
             } => {
                 if correlation_id == published_id {
-                    return Err(anyhow!("Publishing failed"));
+                    return Err(anyhow!("Publishing failed {}", error));
                 }
             }
             _ => (),
@@ -300,6 +304,7 @@ enum NetworkPeerEvent {
         // TODO: return an error here? DialError is not Clonable so we have
         // avoided passing it on
         correlation_id: usize,
+        error: Arc<PublishError>
     },
     GossipPublished {
         correlation_id: usize,
@@ -310,6 +315,7 @@ enum NetworkPeerEvent {
     },
     OutgoingConnectionError {
         connection_id: ConnectionId,
+        error: Arc<DialError>
     },
 }
 
@@ -411,7 +417,7 @@ async fn main() -> Result<()> {
                             },
                             Err(e) => {
                                 warn!(error=?e, "Could not publish to swarm. Retrying...");
-                                event_tx.send(NetworkPeerEvent::GossipPublishError { correlation_id })?;
+                                event_tx.send(NetworkPeerEvent::GossipPublishError { correlation_id, error: Arc::new(e) })?;
                             }
                         }
                     },
@@ -459,7 +465,7 @@ async fn process_swarm_event(
             connection_id,
         } => {
             info!("Failed to dial {peer_id:?}: {error}");
-            event_tx.send(NetworkPeerEvent::OutgoingConnectionError { connection_id })?;
+            event_tx.send(NetworkPeerEvent::OutgoingConnectionError { connection_id, error: Arc::new(error) })?;
         }
 
         SwarmEvent::IncomingConnectionError { error, .. } => {
