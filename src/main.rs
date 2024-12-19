@@ -1,9 +1,10 @@
 use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use libp2p::futures::future::join_all;
 use libp2p::gossipsub::MessageId;
 use libp2p::gossipsub::PublishError;
+use libp2p::multiaddr::Protocol;
 use libp2p::swarm::DialError;
 use libp2p::swarm::{dial_opts::DialOpts, ConnectionId};
 use libp2p::{
@@ -18,24 +19,26 @@ use libp2p::{
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     Multiaddr, StreamProtocol, Swarm,
 };
-use std::net::ToSocketAddrs;
+use petname::Generator;
+use petname::Petnames;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::future::Future;
+use std::hash::{Hash, Hasher};
+use std::net::ToSocketAddrs;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{hash::DefaultHasher, io::Error, time::Duration};
-use std::{
-    hash::{Hash, Hasher},
-    process::Command,
-};
 use tokio::{
     select,
     sync::{broadcast, mpsc},
     time::sleep,
 };
+use tracing::error;
+use tracing::info;
 use tracing::warn;
-use tracing::{error, info};
-
+static COMPILE_ID: u64 = compile_time::unix!();
 static NEXT_CORRELATION_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(NetworkBehaviour)]
@@ -118,6 +121,15 @@ fn resolve_ipv6(domain: &str) -> Result<String> {
     Ok(addr.ip().to_string())
 }
 
+pub enum RetryError {
+    Failure(anyhow::Error),
+    Retry(anyhow::Error),
+}
+
+fn to_retry(e: impl Into<anyhow::Error>) -> RetryError {
+    RetryError::Retry(e.into())
+}
+
 /// Retries an async operation with exponential backoff
 ///
 /// # Arguments
@@ -134,7 +146,7 @@ pub async fn retry_with_backoff<F, Fut>(
 ) -> Result<()>
 where
     F: Fn() -> Fut,
-    Fut: Future<Output = Result<()>>,
+    Fut: Future<Output = Result<(), RetryError>>,
 {
     let mut current_attempt = 1;
     let mut delay_ms = initial_delay_ms;
@@ -142,69 +154,143 @@ where
     loop {
         match operation().await {
             Ok(_) => return Ok(()),
-            Err(e) => {
-                if current_attempt >= max_attempts {
-                    return Err(anyhow::anyhow!(
-                        "Operation failed after {} attempts. Last error: {}",
-                        max_attempts,
-                        e
-                    ));
+            Err(re) => {
+                match re {
+                    RetryError::Retry(e) => {
+                        if current_attempt >= max_attempts {
+                            return Err(anyhow::anyhow!(
+                                "Operation failed after {} attempts. Last error: {}",
+                                max_attempts,
+                                e
+                            ));
+                        }
+
+                        println!(
+                            "Attempt {}/{} failed, retrying in {}ms: {}",
+                            current_attempt, max_attempts, delay_ms, e
+                        );
+
+                        sleep(Duration::from_millis(delay_ms)).await;
+                        current_attempt += 1;
+                        delay_ms *= 2; // Exponential backoff
+                    }
+                    RetryError::Failure(e) => {
+                        println!("FAILURE!: returning to caller.");
+                        return Err(e);
+                    }
                 }
-
-                println!(
-                    "Attempt {}/{} failed, retrying in {}ms: {}",
-                    current_attempt, max_attempts, delay_ms, e
-                );
-
-                sleep(Duration::from_millis(delay_ms)).await;
-                current_attempt += 1;
-                delay_ms *= 2; // Exponential backoff
             }
         }
     }
 }
 
+fn extract_dns_host(addr: &Multiaddr) -> Option<String> {
+    // Iterate through the protocols in the multiaddr
+    for proto in addr.iter() {
+        match proto {
+            // Match on DNS4 or DNS6 protocols
+            Protocol::Dns4(hostname) | Protocol::Dns6(hostname) => {
+                return Some(hostname.to_string())
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+fn get_resolved_multiaddr(value: &Multiaddr) -> Result<Multiaddr> {
+    let maybe_domain = extract_dns_host(value);
+    if let Some(domain) = maybe_domain {
+        let ip = resolve_ipv4(&domain)?;
+        let multi = dns_to_ip_addr(value, &ip)?;
+        return Ok(multi);
+    } else {
+        Ok(value.clone())
+    }
+}
+
+fn dns_to_ip_addr(original: &Multiaddr, ip_str: &str) -> Result<Multiaddr> {
+    let ip = ip_str.parse()?;
+    let mut new_addr = Multiaddr::empty();
+    let mut skip_next = false;
+
+    for proto in original.iter() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        match proto {
+            Protocol::Dns4(_) | Protocol::Dns6(_) => {
+                new_addr.push(Protocol::Ip4(ip));
+                skip_next = false;
+            }
+            _ => new_addr.push(proto),
+        }
+    }
+
+    Ok(new_addr)
+}
+
 async fn attempt_connection(
     cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
     event_tx: &broadcast::Sender<NetworkPeerEvent>,
-    domain: &str,
-) -> Result<()> {
+    multiaddr: &Multiaddr,
+) -> Result<(), RetryError> {
     let mut event_rx = event_tx.subscribe();
-    let ip = resolve_ipv4(domain)?;
-    println!("Resolved '{}' to {}", domain, &ip);
-
-    let addr = format!("/ip4/{}/udp/4001/quic-v1", ip);
-    println!("addr:{}", addr);
-
-    let multi: Multiaddr = addr.parse()?;
-    println!("Dialing: {}...", multi);
-
+    let multi = get_resolved_multiaddr(multiaddr).map_err(to_retry)?;
     let opts: DialOpts = multi.clone().into();
     let dial_connection = opts.connection_id();
-    println!("Dialing {} with connection {}", multi, dial_connection);
-
-    cmd_tx.send(NetworkPeerCommand::Dial(opts)).await?;
-
+    println!("Dialing: '{}' with connection '{}'", multi, dial_connection);
+    cmd_tx
+        .send(NetworkPeerCommand::Dial(opts))
+        .await
+        .map_err(to_retry)?;
     wait_for_connection(&mut event_rx, dial_connection).await
 }
 
 async fn wait_for_connection(
     event_rx: &mut broadcast::Receiver<NetworkPeerEvent>,
     dial_connection: ConnectionId,
-) -> Result<()> {
+) -> Result<(), RetryError> {
     loop {
-        match event_rx.recv().await? {
+        match event_rx.recv().await.map_err(to_retry)? {
             NetworkPeerEvent::ConnectionEstablished { connection_id } => {
                 if connection_id == dial_connection {
                     println!("Connection Established");
                     return Ok(());
                 }
             }
-            NetworkPeerEvent::OutgoingConnectionError { connection_id, error } => {
+            NetworkPeerEvent::DialError { error } => {
+                println!("DialError!");
+                return match error.as_ref() {
+                    // If we are dialing ourself then we should just fail
+                    DialError::NoAddresses { .. } => {
+                        println!("DialError received. Returning RetryError::Failure");
+                        Err(RetryError::Failure(error.clone().into()))
+                    }
+                    // Try again otherwise
+                    _ => Err(RetryError::Retry(error.clone().into())),
+                };
+            }
+            NetworkPeerEvent::OutgoingConnectionError {
+                connection_id,
+                error,
+            } => {
+                println!("OutgoingConnectionError!");
                 if connection_id == dial_connection {
-                    println!("Connection {} failed because of error {}. Retrying...", connection_id, error);
-                    // sleep(Duration::from_secs(2)).await;
-                    return Err(anyhow!("Connection failed"));
+                    println!(
+                        "Connection {} failed because of error {}. Retrying...",
+                        connection_id, error
+                    );
+                    return match error.as_ref() {
+                        // If we are dialing ourself then we should just fail
+                        DialError::NoAddresses { .. } => {
+                            Err(RetryError::Failure(error.clone().into()))
+                        }
+                        // Try again otherwise
+                        _ => Err(RetryError::Retry(error.clone().into())),
+                    };
                 }
             }
             _ => (),
@@ -217,7 +303,7 @@ async fn attempt_gossip_publish(
     event_tx: &broadcast::Sender<NetworkPeerEvent>,
     topic: &str,
     data: Vec<u8>,
-) -> Result<()> {
+) -> Result<(), RetryError> {
     let mut event_rx = event_tx.subscribe();
     let correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::SeqCst);
     cmd_tx
@@ -226,16 +312,17 @@ async fn attempt_gossip_publish(
             data,
             correlation_id,
         })
-        .await?; // this should be sent over gossipsub to all the nodes
+        .await
+        .map_err(to_retry)?; // this should be sent over gossipsub to all the nodes
     wait_for_publish_confirmation(&mut event_rx, correlation_id).await
 }
 
 async fn wait_for_publish_confirmation(
     event_rx: &mut broadcast::Receiver<NetworkPeerEvent>,
     correlation_id: usize,
-) -> Result<()> {
+) -> Result<(), RetryError> {
     loop {
-        match event_rx.recv().await? {
+        match event_rx.recv().await.map_err(to_retry)? {
             NetworkPeerEvent::GossipPublished {
                 correlation_id: published_id,
                 message_id,
@@ -247,10 +334,10 @@ async fn wait_for_publish_confirmation(
             }
             NetworkPeerEvent::GossipPublishError {
                 correlation_id: published_id,
-                error
+                error,
             } => {
                 if correlation_id == published_id {
-                    return Err(anyhow!("Publishing failed {}", error));
+                    return Err(to_retry(error));
                 }
             }
             _ => (),
@@ -265,10 +352,16 @@ const BACKOFF_MAX_RETRIES: u32 = 10;
 async fn dial_domain(
     cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
     event_tx: &broadcast::Sender<NetworkPeerEvent>,
-    domain: &str,
+    multiaddr_str: &str,
 ) -> Result<()> {
-    println!("Now dialing in to {}", domain);
-    retry_with_backoff(|| attempt_connection(cmd_tx, event_tx, domain), BACKOFF_MAX_RETRIES, BACKOFF_DELAY).await?;
+    let multiaddr = &multiaddr_str.parse()?;
+    println!("Now dialing in to {}", multiaddr);
+    retry_with_backoff(
+        || attempt_connection(cmd_tx, event_tx, multiaddr),
+        BACKOFF_MAX_RETRIES,
+        BACKOFF_DELAY,
+    )
+    .await?;
     Ok(())
 }
 
@@ -304,27 +397,56 @@ enum NetworkPeerEvent {
         // TODO: return an error here? DialError is not Clonable so we have
         // avoided passing it on
         correlation_id: usize,
-        error: Arc<PublishError>
+        error: Arc<PublishError>,
     },
     GossipPublished {
         correlation_id: usize,
         message_id: MessageId,
+    },
+    DialError {
+        error: Arc<DialError>,
     },
     ConnectionEstablished {
         connection_id: ConnectionId,
     },
     OutgoingConnectionError {
         connection_id: ConnectionId,
-        error: Arc<DialError>
+        error: Arc<DialError>,
     },
 }
 
+fn trace_error(r: Result<()>) {
+    if let Err(err) = r {
+        error!("{}", err);
+    }
+}
+
+// This is what the "peer" role will do
+async fn bootstrap_behaviour(
+    cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
+    event_tx: &broadcast::Sender<NetworkPeerEvent>,
+    peers: Vec<String>,
+) -> Result<()> {
+    let futures: Vec<_> = peers
+        .iter()
+        .map(|addr| dial_domain(cmd_tx, event_tx, addr))
+        .collect();
+    let results = join_all(futures).await;
+    results.into_iter().for_each(trace_error);
+    Ok(())
+}
 // This is what the "peer" role will do
 async fn peer_behaviour(
     cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
     event_tx: &broadcast::Sender<NetworkPeerEvent>,
+    peers: Vec<String>,
 ) -> Result<()> {
-    dial_domain(cmd_tx, event_tx, "bootstrap").await?;
+    let futures: Vec<_> = peers
+        .iter()
+        .map(|addr| dial_domain(cmd_tx, event_tx, addr))
+        .collect();
+    let results = join_all(futures).await;
+    results.into_iter().for_each(trace_error);
     Ok(())
 }
 
@@ -332,13 +454,24 @@ async fn peer_behaviour(
 async fn sender_behaviour(
     cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
     event_tx: &broadcast::Sender<NetworkPeerEvent>,
+    peers: Vec<String>,
     topic: &str,
 ) -> Result<()> {
-    dial_domain(&cmd_tx, event_tx, "peer").await?;
+    let futures: Vec<_> = peers
+        .iter()
+        .map(|addr| dial_domain(cmd_tx, event_tx, addr))
+        .collect();
+    let results = join_all(futures).await;
+    results.into_iter().for_each(trace_error);
     println!("Sending message 1,2,3,4...");
     gossip_data(cmd_tx, event_tx, topic, vec![1, 2, 3, 4]).await?;
     println!("Sent and array of bytes 1,2,3,4 to be gossiped");
     Ok(())
+}
+
+fn generate_id() -> String {
+    let mut rng = StdRng::seed_from_u64(COMPILE_ID);
+    Petnames::small().generate(&mut rng, 2, "_").unwrap_or("ERROR".to_owned())
 }
 
 #[tokio::main]
@@ -350,7 +483,7 @@ async fn main() -> Result<()> {
     let (mut event_tx, _) = broadcast::channel::<NetworkPeerEvent>(100); // TODO : tune this param
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<NetworkPeerCommand>(100); // TODO : tune this param
 
-    info!("STARTING!");
+    info!("STARTING \"{}\"!", generate_id());
     let enable_mdns = false;
     let topic_str = "some_topic";
     let ed25519_keypair = ed25519::Keypair::generate();
@@ -374,8 +507,43 @@ async fn main() -> Result<()> {
         async move {
             let role = std::env::var("ROLE").unwrap_or_default();
             match role.as_str() {
-                "peer" => peer_behaviour(&cmd_tx, &event_tx).await?,
-                "sender" => sender_behaviour(&cmd_tx, &event_tx, topic_str).await?,
+                "bootstrap" => {
+                    bootstrap_behaviour(
+                        &cmd_tx,
+                        &event_tx,
+                        vec![
+                            "/dns4/bootstrap/udp/4001/quic-v1".to_string(),
+                            "/dns4/peer/udp/4001/quic-v1".to_string(),
+                            "/dns4/sender/udp/4001/quic-v1".to_string(),
+                        ],
+                    )
+                    .await?
+                }
+                "peer" => {
+                    peer_behaviour(
+                        &cmd_tx,
+                        &event_tx,
+                        vec![
+                            "/dns4/bootstrap/udp/4001/quic-v1".to_string(),
+                            "/dns4/peer/udp/4001/quic-v1".to_string(),
+                            "/dns4/sender/udp/4001/quic-v1".to_string(),
+                        ],
+                    )
+                    .await?
+                }
+                "sender" => {
+                    sender_behaviour(
+                        &cmd_tx,
+                        &event_tx,
+                        vec![
+                            "/dns4/bootstrap/udp/4001/quic-v1".to_string(),
+                            "/dns4/peer/udp/4001/quic-v1".to_string(),
+                            "/dns4/sender/udp/4001/quic-v1".to_string(),
+                        ],
+                        topic_str,
+                    )
+                    .await?
+                }
                 _ => (),
             };
             anyhow::Ok(())
@@ -422,7 +590,14 @@ async fn main() -> Result<()> {
                         }
                     },
                     NetworkPeerCommand::Dial(multi) => {
-                        swarm.dial(multi)?;
+                        println!("DIAL: {:?}", multi);
+                        match swarm.dial(multi) {
+                            Ok(v) => println!("Dial returned {:?}", v),
+                            Err(error) => {
+                                println!("Dialing error! {}", error);
+                                event_tx.send(NetworkPeerEvent::DialError { error: error.into() })?;
+                            }
+                        }
                     }
                 }
             }
@@ -465,7 +640,10 @@ async fn process_swarm_event(
             connection_id,
         } => {
             info!("Failed to dial {peer_id:?}: {error}");
-            event_tx.send(NetworkPeerEvent::OutgoingConnectionError { connection_id, error: Arc::new(error) })?;
+            event_tx.send(NetworkPeerEvent::OutgoingConnectionError {
+                connection_id,
+                error: Arc::new(error),
+            })?;
         }
 
         SwarmEvent::IncomingConnectionError { error, .. } => {

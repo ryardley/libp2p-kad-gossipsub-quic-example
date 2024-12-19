@@ -20,3 +20,5 @@ tracing = "0.1.37"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0.86"
 rand = "0.8.5"
+compile-time = "0.2.0"
+petname = "2.0.2"
