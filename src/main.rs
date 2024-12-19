@@ -483,7 +483,7 @@ async fn main() -> Result<()> {
     let (mut event_tx, _) = broadcast::channel::<NetworkPeerEvent>(100); // TODO : tune this param
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<NetworkPeerCommand>(100); // TODO : tune this param
 
-    info!("STARTING \"{}\"!", generate_id());
+    info!("\n\n\nSTARTING \"{}\"!", generate_id());
     let enable_mdns = false;
     let topic_str = "some_topic";
     let ed25519_keypair = ed25519::Keypair::generate();
