@@ -151,10 +151,66 @@ Each command is managed in a separate tokio spawn to handle it's EB workflow and
 
 ### Setting up on a remote server
 
+Install docker
+
+```
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+sudo mkdir -m 0755 -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo docker run hello-world
+```
+
+
 Initialize swarm
 
 ```
 docker swarm init
+```
+
+NOTE: If you get an error about not being able to choose between IP addresses choose the more private IP address.
+
+
+```
+docker swarm init --advertise-addr 10.49.x.x
+```
+
+NOTE: You may need to setup buildkit:
+
+```
+echo '{
+  "builder": {
+    "gc": {
+      "enabled": true,
+      "defaultKeepStorage": "20GB"
+    }
+  },
+  "features": {
+    "buildkit": true,
+    "containerd-snapshotter": true
+  }
+}' | sudo tee /etc/docker/daemon.json
+```
+
+and then restart the docker daemon
+
+```
+sudo systemctl restart docker
+```
+
+Clone the repo
+
+```
+git clone https://github.com/ryardley/libp2p-kad-gossipsub-quic-example.git
+```
+
+Move to the new folder:
+
+```
+cd libp2p-kad-gossipsub-quic-example/
 ```
 
 Build the app
@@ -167,6 +223,12 @@ Then deploy to the swarm
 
 ```
 ./deploy_all.sh
+```
+
+Inspect the output:
+
+```
+./inspect.sh
 ```
 
 Inspect the output you should see that a message [1,2,3,4] was sent.
@@ -189,9 +251,10 @@ ROLE=sender PORT=4004 PEER_1=/ip4/1.2.3.4/udp/4002/quic-v1 cargo run
 
 Where 1.2.3.4 is the IP address of the remote machine.
 
+---
+
 You should see a second message broadcast on peers using the `./inspect.sh` script
 
----
 
 Now we should setup the firewall to ensure everything is secure. 
 
