@@ -262,6 +262,7 @@ Setup the iptables rules to block all ports aside from SSH and the service ports
 
 ```
 #!/usr/bin/env bash
+sudo mkdir -p /etc/iptables
 
 # First, flush existing rules
 iptables -F

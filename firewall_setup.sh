@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+sudo mkdir -p /etc/iptables
+
 # First, flush existing rules
 iptables -F
 iptables -X
