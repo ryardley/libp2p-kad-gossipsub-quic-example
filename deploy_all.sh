@@ -24,6 +24,6 @@ docker stack rm p2p
 
 wait_removed p2p
 
-docker stack deploy -c docker-compose.yml --prune p2p
+docker stack deploy -c docker-compose.yml --prune --force p2p
 
 wait_ready p2p
