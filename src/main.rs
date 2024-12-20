@@ -23,6 +23,7 @@ use petname::Generator;
 use petname::Petnames;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::env;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::net::ToSocketAddrs;
@@ -349,7 +350,7 @@ const BACKOFF_DELAY: u64 = 500;
 const BACKOFF_MAX_RETRIES: u32 = 10;
 
 // This will dial domain with retry and exponential backoff
-async fn dial_domain(
+async fn dial_multiaddr(
     cmd_tx: &mpsc::Sender<NetworkPeerCommand>,
     event_tx: &broadcast::Sender<NetworkPeerEvent>,
     multiaddr_str: &str,
@@ -429,7 +430,7 @@ async fn bootstrap_behaviour(
 ) -> Result<()> {
     let futures: Vec<_> = peers
         .iter()
-        .map(|addr| dial_domain(cmd_tx, event_tx, addr))
+        .map(|addr| dial_multiaddr(cmd_tx, event_tx, addr))
         .collect();
     let results = join_all(futures).await;
     results.into_iter().for_each(trace_error);
@@ -443,7 +444,7 @@ async fn peer_behaviour(
 ) -> Result<()> {
     let futures: Vec<_> = peers
         .iter()
-        .map(|addr| dial_domain(cmd_tx, event_tx, addr))
+        .map(|addr| dial_multiaddr(cmd_tx, event_tx, addr))
         .collect();
     let results = join_all(futures).await;
     results.into_iter().for_each(trace_error);
@@ -459,7 +460,7 @@ async fn sender_behaviour(
 ) -> Result<()> {
     let futures: Vec<_> = peers
         .iter()
-        .map(|addr| dial_domain(cmd_tx, event_tx, addr))
+        .map(|addr| dial_multiaddr(cmd_tx, event_tx, addr))
         .collect();
     let results = join_all(futures).await;
     results.into_iter().for_each(trace_error);
@@ -471,11 +472,18 @@ async fn sender_behaviour(
 
 fn generate_id() -> String {
     let mut rng = StdRng::seed_from_u64(COMPILE_ID);
-    Petnames::small().generate(&mut rng, 2, "_").unwrap_or("ERROR".to_owned())
+    Petnames::small()
+        .generate(&mut rng, 2, "_")
+        .unwrap_or("ERROR".to_owned())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let peers: Vec<_> = (1..)
+        .map(|i| env::var(format!("PEER_{i}")))
+        .take_while(Result::is_ok)
+        .map(Result::unwrap)
+        .collect();
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -498,52 +506,19 @@ async fn main() -> Result<()> {
     let topic = gossipsub::IdentTopic::new(topic_str);
 
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-    let addr = "/ip4/0.0.0.0/udp/4001/quic-v1".to_string();
+    let role = std::env::var("ROLE").unwrap_or_default();
+    let port = std::env::var("PORT").unwrap();
+    let addr = format!("/ip4/0.0.0.0/udp/{}/quic-v1", port).to_string();
     swarm.listen_on(addr.parse()?)?;
 
     // Specialized role behaviours
     tokio::spawn({
         let event_tx = event_tx.clone();
         async move {
-            let role = std::env::var("ROLE").unwrap_or_default();
             match role.as_str() {
-                "bootstrap" => {
-                    bootstrap_behaviour(
-                        &cmd_tx,
-                        &event_tx,
-                        vec![
-                            "/dns4/bootstrap/udp/4001/quic-v1".to_string(),
-                            "/dns4/peer/udp/4001/quic-v1".to_string(),
-                            "/dns4/sender/udp/4001/quic-v1".to_string(),
-                        ],
-                    )
-                    .await?
-                }
-                "peer" => {
-                    peer_behaviour(
-                        &cmd_tx,
-                        &event_tx,
-                        vec![
-                            "/dns4/bootstrap/udp/4001/quic-v1".to_string(),
-                            "/dns4/peer/udp/4001/quic-v1".to_string(),
-                            "/dns4/sender/udp/4001/quic-v1".to_string(),
-                        ],
-                    )
-                    .await?
-                }
-                "sender" => {
-                    sender_behaviour(
-                        &cmd_tx,
-                        &event_tx,
-                        vec![
-                            "/dns4/bootstrap/udp/4001/quic-v1".to_string(),
-                            "/dns4/peer/udp/4001/quic-v1".to_string(),
-                            "/dns4/sender/udp/4001/quic-v1".to_string(),
-                        ],
-                        topic_str,
-                    )
-                    .await?
-                }
+                "bootstrap" => bootstrap_behaviour(&cmd_tx, &event_tx, peers).await?,
+                "peer" => peer_behaviour(&cmd_tx, &event_tx, peers).await?,
+                "sender" => sender_behaviour(&cmd_tx, &event_tx, peers, topic_str).await?,
                 _ => (),
             };
             anyhow::Ok(())
@@ -561,7 +536,10 @@ async fn main() -> Result<()> {
                     Ok(event) = event_rx.recv() => {
                         match event {
                             NetworkPeerEvent::GossipData(data) => {
-                                println!("Received raw message data: {:?}", data);
+                                println!("\n\n-------------------------------------------------");
+                                println!("      Received raw message data: {:?}", data);
+                                println!("-------------------------------------------------\n\n");
+
                             },
                             _ => ()
                         }

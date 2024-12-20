@@ -3,34 +3,73 @@ services:
   bootstrap:
     image: norepo/p2p-app
     environment:
-      - ROLE=bootstrap
+      ROLE: bootstrap
+      PORT: 4001
+      PEER_1: /dns4/bootstrap/udp/4001/quic-v1
+      PEER_2: /dns4/peer/udp/4002/quic-v1
+      PEER_3: /dns4/sender/udp/4003/quic-v1
     deploy:
       replicas: 1
       endpoint_mode: dnsrr
+    ports:
+      - target: 4001
+        published: 4001
+        protocol: udp
+        mode: host
+      - target: 4001
+        published: 4001
+        protocol: tcp
+        mode: host
     networks:
       - p2p-net
 
   peer:
     image: norepo/p2p-app
     environment:
-      - ROLE=peer
+      ROLE: peer
+      PORT: 4002
+      PEER_1: /dns4/bootstrap/udp/4001/quic-v1
+      PEER_2: /dns4/peer/udp/4002/quic-v1
+      PEER_3: /dns4/sender/udp/4003/quic-v1
     deploy:
       replicas: 1
       endpoint_mode: dnsrr
     depends_on:
       - bootstrap
+    ports:
+      - target: 4002
+        published: 4002
+        protocol: udp
+        mode: host
+      - target: 4002
+        published: 4002
+        protocol: tcp
+        mode: host
     networks:
       - p2p-net
 
   sender:
     image: norepo/p2p-app
     environment:
-      - ROLE=sender
+      ROLE: sender
+      PORT: 4003
+      PEER_1: /dns4/bootstrap/udp/4001/quic-v1
+      PEER_2: /dns4/peer/udp/4002/quic-v1
+      PEER_3: /dns4/sender/udp/4003/quic-v1
     deploy:
       replicas: 1
       endpoint_mode: dnsrr
     depends_on:
       - peer
+    ports:
+      - target: 4003
+        published: 4003
+        protocol: udp
+        mode: host
+      - target: 4003
+        published: 4003
+        protocol: tcp
+        mode: host
     networks:
       - p2p-net
 networks:

@@ -17,7 +17,7 @@ To get started, follow these commands:
 ./build.sh
 
 # Deploy to Docker Swarm
-./deploy.sh
+./deploy_all.sh
 ```
 
 ## Inspecting the output
@@ -147,3 +147,88 @@ Exponential backoff has been applied to dialing in to swarm nodes as nodes may b
 In order for this to work and to avoid sharing a `Swarm` within an `Arc<Mutex<T>>` everywhere here I am demonstrating using channels to manage asynchrony and ownership.
 
 Each command is managed in a separate tokio spawn to handle it's EB workflow and commands are simply sent to the swarm over a channel. This means the function managing the backoff need not hold a mutable reference to the swarm. 
+
+
+### Setting up on a remote server
+
+Initialize swarm
+
+```
+docker swarm init
+```
+
+Build the app
+
+```
+./build.sh
+```
+
+Then deploy to the swarm
+
+```
+./deploy_all.sh
+```
+
+Inspect the output you should see that a message [1,2,3,4] was sent.
+
+
+---
+
+Then locally attempt to connect to the box by building the binary:
+
+```
+cargo build --release
+```
+
+Then run with the appropriate env vars:
+
+
+```
+ROLE=sender PORT=4004 PEER_1=/ip4/1.2.3.4/udp/4002/quic-v1 cargo run
+```
+
+Where 1.2.3.4 is the IP address of the remote machine.
+
+You should see a second message broadcast on peers using the `./inspect.sh` script
+
+---
+
+Now we should setup the firewall to ensure everything is secure. 
+
+Setup the iptables rules to block all ports aside from SSH and the service ports:
+
+```
+#!/usr/bin/env bash
+
+# First, flush existing rules
+iptables -F
+iptables -X
+iptables -Z
+
+# Set default policies to DROP
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT ACCEPT
+
+# Allow loopback traffic
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# Allow established and related connections
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Allow specific ports (both TCP and UDP)
+iptables -A INPUT -p tcp -m multiport --dports 4001,4002,4003 -j ACCEPT
+iptables -A INPUT -p udp -m multiport --dports 4001,4002,4003 -j ACCEPT
+
+# If you need SSH access (recommended), add:
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+# Save the rules (depending on your distro, use one of these):
+# For Debian/Ubuntu:
+iptables-save > /etc/iptables/rules.v4
+# For RHEL/CentOS:
+service iptables save
+```
+
+Run the same test to see that the message is being sent.
