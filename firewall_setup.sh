@@ -6,5 +6,8 @@ sudo ufw allow 22/tcp
 sudo ufw allow 4001/udp
 sudo ufw allow 4002/udp
 sudo ufw allow 4003/udp
+sudo ufw allow 4001/tcp
+sudo ufw allow 4002/tcp
+sudo ufw allow 4003/tcp
 
 sudo ufw enable
