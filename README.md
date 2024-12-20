@@ -291,7 +291,7 @@ iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 # For Debian/Ubuntu:
 iptables-save > /etc/iptables/rules.v4
 # For RHEL/CentOS:
-service iptables save
+# service iptables save
 ```
 
 Run the same test to see that the message is being sent.
